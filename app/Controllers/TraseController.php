@@ -18,9 +18,12 @@ class TraseController extends BaseController
         $this->session = session();
     }
 
-    // 1. Halaman Login Sederhana
+    // --- 1. HALAMAN LOGIN & PROSES ---
     public function login()
     {
+        if ($this->session->get('isLoggedIn')) {
+            return $this->redirectByRole($this->session->get('role'));
+        }
         return view('login_page');
     }
 
@@ -29,26 +32,25 @@ class TraseController extends BaseController
         $username = $this->request->getPost('username');
         $password = $this->request->getPost('password');
 
-        // Koneksi langsung ke database untuk cek user
         $db = \Config\Database::connect();
         $user = $db->table('users')->where('username', $username)->get()->getRowArray();
 
-        // Jika user ditemukan dan password-nya cocok (di-verify dari hash)
         if ($user && password_verify($password, $user['password'])) {
             $this->session->set([
                 'isLoggedIn' => true,
                 'role'       => $user['role']
             ]);
-
-            // Redirect sesuai role masing-masing
-            if ($user['role'] == 'operator') {
-                return redirect()->to('/input');
-            } else {
-                return redirect()->to('/monitor');
-            }
+            return $this->redirectByRole($user['role']);
         }
 
         return redirect()->back()->with('error', 'Username atau Password Salah!');
+    }
+
+    private function redirectByRole($role)
+    {
+        if ($role === 'admin') return redirect()->to('/admin');
+        if ($role === 'operator') return redirect()->to('/input');
+        return redirect()->to('/monitor');
     }
 
     public function logout()
@@ -57,7 +59,7 @@ class TraseController extends BaseController
         return redirect()->to('/login');
     }
 
-    // 2. Halaman Input Data (Khusus Akun Operator)
+    // --- 2. HALAMAN INPUT OPERATOR LAPANGAN ---
     public function inputHalaman()
     {
         if ($this->session->get('role') != 'operator') {
@@ -76,13 +78,127 @@ class TraseController extends BaseController
         ]);
     }
 
+    // --- 3. PROSES SIMPAN DATA & CETAK SATUAN ---
+    public function simpanTrase()
+    {
+        if ($this->session->get('role') != 'operator') return redirect()->to('/login');
+
+        $id = $this->request->getPost('id');
+        $aksi = $this->request->getPost('aksi'); // 'simpan' atau 'cetak'
+
+        $ap = (float)$this->request->getPost('ap');
+        $cera = (float)$this->request->getPost('cera');
+        $hitam = (float)$this->request->getPost('hitam');
+        $busuk = (float)$this->request->getPost('busuk');
+        $pecah = (float)$this->request->getPost('pecah');
+        $kulit = (float)$this->request->getPost('kulit');
+        $batu = (float)$this->request->getPost('batu');
+        $gelondong = (float)$this->request->getPost('gelondong');
+
+        $total = $hitam + $busuk + $pecah + $kulit + $batu + $gelondong;
+
+        $batchInfo = $this->batchModel->find($this->request->getPost('batch_id'));
+        $batchName = $batchInfo ? $batchInfo['nama_batch'] : 'SHIFT-UNKNOWN';
+
+        $dataArray = [
+            'batch_id'   => $this->request->getPost('batch_id'),
+            'jenis_kopi' => $this->request->getPost('jenis_kopi'),
+            'tanggal'    => date('Y-m-d'),
+            'mesin_gs'   => $this->request->getPost('mesin_gs'),
+            'pukul'      => date('H:i:s'),
+            'ap'         => $ap,
+            'cera'       => $cera,
+            'hitam'      => $hitam,
+            'busuk'      => $busuk,
+            'pecah'      => $pecah,
+            'kulit'      => $kulit,
+            'batu'       => $batu,
+            'gelondong'  => $gelondong,
+            'total'      => $total,
+            'keterangan' => $this->request->getPost('keterangan'),
+        ];
+
+        if (!empty($id)) {
+            $dataArray['id'] = $id;
+        }
+
+        $this->traseModel->save($dataArray);
+
+        // Jika Operator memilih "Simpan & Cetak Label"
+        if ($aksi === 'cetak') {
+            $dataCetak = [
+                'batch_name' => $batchName,
+                'jenis_kopi' => $dataArray['jenis_kopi'],
+                'tanggal'    => date('d-m-Y'),
+                'jam'        => date('H:i'),
+                'mesin_gs'   => $dataArray['mesin_gs'],
+                'ap'         => $ap,
+                'cera'       => $cera,
+                'hitam'      => $hitam,
+                'busuk'      => $busuk,
+                'pecah'      => $pecah,
+                'kulit'      => $kulit,
+                'batu'       => $batu,
+                'gelondong'  => $gelondong,
+                'total'      => $total
+            ];
+            // Menggunakan ->with() sebagai pengganti withFlashdata() yang typo kemarin
+            return redirect()->to('/input')->with('cetak_data', $dataCetak);
+        }
+
+        // Jika hanya simpan biasa, langsung redirect tanpa membawa data cetak
+        return redirect()->to('/input');
+    }
+    public function cetakUlang($id)
+    {
+        if ($this->session->get('role') != 'operator') return redirect()->to('/login');
+
+        // 1. Ambil data trase berdasarkan baris ID yang diklik
+        $dataArray = $this->traseModel->find($id);
+        if (!$dataArray) {
+            return redirect()->to('/input');
+        }
+
+        // 2. Ambil informasi nama batch-nya
+        $batchInfo = $this->batchModel->find($dataArray['batch_id']);
+        $batchName = $batchInfo ? $batchInfo['nama_batch'] : 'SHIFT-UNKNOWN';
+
+        // 3. Susun data rekap lengkap komponen kotoran untuk dikirim ke printer
+        $dataCetak = [
+            'batch_name' => $batchName,
+            'jenis_kopi' => $dataArray['jenis_kopi'],
+            'tanggal'    => date('d-m-Y', strtotime($dataArray['tanggal'])),
+            'jam'        => substr($dataArray['pukul'], 0, 5),
+            'mesin_gs'   => $dataArray['mesin_gs'],
+            'ap'         => $dataArray['ap'],
+            'cera'       => $dataArray['cera'],
+            'hitam'      => $dataArray['hitam'],
+            'busuk'      => $dataArray['busuk'],
+            'pecah'      => $dataArray['pecah'],
+            'kulit'      => $dataArray['kulit'],
+            'batu'       => $dataArray['batu'],
+            'gelondong'  => $dataArray['gelondong'],
+            'total'      => $dataArray['total']
+        ];
+
+        // 4. Lemparkan ke halaman dengan membawa data flashdata cetak
+        return redirect()->to('/input')->with('cetak_data', $dataCetak);
+    }
+
+    public function hapusTrase($id)
+    {
+        if ($this->session->get('role') != 'operator') return redirect()->to('/login');
+        $this->traseModel->delete($id);
+        return redirect()->to('/input');
+    }
+
+    // --- 4. KENDALI BATCH ---
     public function bukaBatch()
     {
         if ($this->session->get('role') != 'operator') return redirect()->to('/login');
 
         $this->batchModel->save([
             'nama_batch'   => $this->request->getPost('nama_batch'),
-            'jenis_kopi'   => $this->request->getPost('jenis_kopi'), // Ini akan menyimpan 'KOPI ENTENG RINGAN', 'KER', atau 'TRACEMAX 11%'
             'tanggal_buka' => date('Y-m-d'),
             'status'       => 'Buka'
         ]);
@@ -97,70 +213,13 @@ class TraseController extends BaseController
         return redirect()->to('/input');
     }
 
-    // --- JALUR SIMPAN (BISA UPDATE ATAU INSERT BARU) ---
-    public function simpanTrase()
-    {
-        if ($this->session->get('role') != 'operator') return redirect()->to('/login');
-
-        $id = $this->request->getPost('id'); // Ambil ID hidden (jika ada)
-
-        $ap = (float)$this->request->getPost('ap');
-        $cera = (float)$this->request->getPost('cera');
-        $hitam = (float)$this->request->getPost('hitam');
-        $busuk = (float)$this->request->getPost('busuk');
-        $pecah = (float)$this->request->getPost('pecah');
-        $kulit = (float)$this->request->getPost('kulit');
-        $batu = (float)$this->request->getPost('batu');
-        $gelondong = (float)$this->request->getPost('gelondong');
-
-        // Perhitungan Total sesuai rumus kotoran Anda
-        $total = $hitam + $busuk + $pecah + $kulit + $batu + $gelondong;
-
-        $dataArray = [
-            'batch_id'   => $this->request->getPost('batch_id'),
-            'jenis_kopi' => $this->request->getPost('jenis_kopi'),
-            'tanggal'    => date('Y-m-d'),
-            'mesin_gs'   => $this->request->getPost('mesin_gs'),
-            'pukul'      => date('H:i:s'),
-            'ap' => $ap,
-            'cera' => $cera,
-            'hitam' => $hitam,
-            'busuk' => $busuk,
-            'pecah' => $pecah,
-            'kulit' => $kulit,
-            'batu' => $batu,
-            'gelondong' => $gelondong,
-            'total'      => $total,
-            'keterangan' => $this->request->getPost('keterangan'),
-        ];
-
-        // LOGIKA UTAMA: Jika ID ada raises, lakukan edit update data lama
-        if (!empty($id)) {
-            $dataArray['id'] = $id;
-        }
-
-        $this->traseModel->save($dataArray); // Fungsi save() otomatis mendeteksi insert/update berdasarkan keberadaan key ID
-
-        return redirect()->to('/input');
-    }
-
-    // --- FUNGSI HAPUS DATA ---
-    public function hapusTrase($id)
-    {
-        if ($this->session->get('role') != 'operator') return redirect()->to('/login');
-
-        $this->traseModel->delete($id);
-        return redirect()->to('/input');
-    }
-
-    // 3. Halaman Layar Monitor (Bisa diakses Akun Monitor & Operator)
+    // --- 5. LIVE MONITOR TV BROADCAST ---
     public function monitorHalaman()
     {
         if (!$this->session->get('isLoggedIn')) return redirect()->to('/login');
         return view('dashboard_monitor');
     }
 
-    // API JSON untuk auto-refresh layar monitor
     public function getLatestData()
     {
         $activeBatch = $this->batchModel->where('status', 'Buka')->orderBy('id', 'DESC')->first();
